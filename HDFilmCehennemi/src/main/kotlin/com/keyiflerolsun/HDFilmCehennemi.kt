@@ -215,50 +215,52 @@ class HDFilmCehennemi : MainAPI() {
         val reversedString = decodedOnce.reversed()
         val decodedTwice = base64Decode(reversedString)
 
-        val hdchLink = when {
-            decodedTwice.contains("+") -> decodedTwice.substringAfterLast("+")
-            decodedTwice.contains(" ") -> decodedTwice.substringAfterLast(" ")
-            decodedTwice.contains("|") -> decodedTwice.substringAfterLast("|")
-            else -> decodedTwice
-        }
+        val hdchLink    = if (decodedTwice.contains("+")) {
+        decodedTwice.substringAfterLast("+")
+            } else if (decodedTwice.contains(" ")) {
+        decodedTwice.substringAfterLast(" ")
+            } else if (decodedTwice.contains("|")){
+        decodedTwice.substringAfterLast("|")
+            } else {
+        decodedTwice
+            }
         Log.d("HDCH", "decodedTwice $decodedTwice")
-        return hdchLink
-    }
-
-    private suspend fun invokeLocalSource(
+             return hdchLink
+        }
+ private suspend fun invokeLocalSource(
         source: String,
         url: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        try {
-            val doc = app.get(url, referer = "$mainUrl/", interceptor = interceptor).document
-            val base64Input = doc.select("script")
-                .mapNotNull { Regex("""Base64\.decode\("([^"]+)""").find(it.data())?.groupValues?.get(1) }
-                .firstOrNull()
+        val script = app.get(
+            url,
+            referer = "${mainUrl}/"
+        ).document.select("script")
+            .find { it.data().contains("sources:") }?.data() ?: return
+        val videoData = getAndUnpack(script).substringAfter("file_link=\"").substringBefore("\";")
+        val subData = script.substringAfter("tracks: [").substringBefore("]")
 
-            if (base64Input != null) {
-                val decoded = dcHello(base64Input)
-                val lastUrl = if (decoded.startsWith("http")) decoded else "https://$decoded"
+        callback.invoke(
+            ExtractorLink(
+                source,
+                source,
+                base64Decode(videoData),
+                "$mainUrl/",
+                Qualities.Unknown.value,
+                true
+            )
+        )
 
-                Log.d("HDCH", "[$source] decoded = $lastUrl")
-
-                callback.invoke(
-                    ExtractorLink(
-                        source = source,
-                        name = source,
-                        url = lastUrl,
-                        referer = url,
-                        quality = Qualities.Unknown.value,
-                        isM3u8 = lastUrl.contains(".m3u8")
+        tryParseJson<List<SubSource>>("[${subData}]")
+            ?.filter { it.kind == "captions" }?.map {
+                subtitleCallback.invoke(
+                    SubtitleFile(
+                        it.label.toString(),
+                        fixUrl(it.file.toString())
                     )
                 )
-            } else {
-                Log.e("HDCH", "[$source] Base64 video bulunamadı!")
             }
-        } catch (e: Exception) {
-            Log.e("HDCH", "invokeLocalSource hata: ${e.message}")
-        }
     }
 
     override suspend fun loadLinks(
@@ -267,50 +269,31 @@ class HDFilmCehennemi : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.d("HDCH", "data » $data")
-        val document = app.get(data, interceptor = interceptor).document
-
-        document.select("div.alternative-links button.alternative-link").forEach { btn ->
-            val source = btn.text().replace("(HDrip Xbet)", "").trim()
-            val videoID = btn.attr("data-video")
-
-            val apiGet = app.get(
-                "$mainUrl/video/$videoID/",
-                interceptor = interceptor,
-                headers = mapOf(
-                    "Content-Type" to "application/json",
-                    "X-Requested-With" to "fetch"
-                ),
-                referer = data
-            ).text
-
-            var iframe = Regex("""data-src=\\"([^"]+)""")
-                .find(apiGet)?.groupValues?.get(1)
-                ?.replace("\\", "")
-
-            Log.d("HDCH", "[$source] iframe = $iframe")
-
-            if (iframe.isNullOrBlank()) return@forEach
-
-            // Rapidrame fix
-            if (iframe.contains("rapidrame")) {
-                iframe = "$mainUrl/rplayer/" + iframe.substringAfter("?rapidrame_id=")
-                Log.d("HDCH", "Rapidrame iframe: $iframe")
-            }
-
-            // Eğer bilinen host ise → Cloudstream extractor
-            if (
-                iframe.contains("close") ||
-                iframe.contains("rapidrame") ||
-                iframe.contains("filemoon") ||
-                iframe.contains("vidmoly") ||
-                iframe.contains("streamtape") ||
-                iframe.contains("dood")
-            ) {
-                loadExtractor(iframe, data, subtitleCallback, callback)
-            } else {
-                // Özel player decode
-                invokeLocalSource(source, iframe, subtitleCallback, callback)
+        app.get(data).document.select("nav.nav.card-nav.nav-slider a.nav-link").map {
+            Pair(it.attr("href"), it.text())
+        }.apmap { (url, source) ->
+            safeApiCall {
+                app.get(url).document.select("div.card-video > iframe").attr("data-src")
+                    .let { url ->
+                        if (url.startsWith(mainUrl)) {
+                            invokeLocalSource(source, url, subtitleCallback, callback)
+                        } else {
+                            loadExtractor(url, "$mainUrl/", subtitleCallback) { link ->
+                                callback.invoke(
+                                    ExtractorLink(
+                                        source,
+                                        source,
+                                        link.url,
+                                        link.referer,
+                                        link.quality,
+                                        link.type,
+                                        link.headers,
+                                        link.extractorData
+                                    )
+                                )
+                            }
+                        }
+                    }
             }
         }
         return true
@@ -319,15 +302,17 @@ class HDFilmCehennemi : MainAPI() {
     private data class SubSource(
         @JsonProperty("file") val file: String? = null,
         @JsonProperty("label") val label: String? = null,
-        @JsonProperty("language") val language: String? = null,
-        @JsonProperty("kind") val kind: String? = null
+        @JsonProperty("kind") val kind: String? = null,
     )
 
-    data class Results(@JsonProperty("results") val results: List<String> = arrayListOf())
-    data class HDFC(@JsonProperty("html") val html: String, @JsonProperty("meta") val meta: Meta)
-    data class Meta(
-        @JsonProperty("title") val title: String,
-        @JsonProperty("canonical") val canonical: Boolean,
-        @JsonProperty("keywords") val keywords: Boolean
+    data class Result(
+        @JsonProperty("result") val result: ArrayList<Media>? = arrayListOf(),
+    )
+
+    data class Media(
+        @JsonProperty("title") val title: String? = null,
+        @JsonProperty("poster") val poster: String? = null,
+        @JsonProperty("slug") val slug: String? = null,
+        @JsonProperty("slug_prefix") val slugPrefix: String? = null,
     )
 }
