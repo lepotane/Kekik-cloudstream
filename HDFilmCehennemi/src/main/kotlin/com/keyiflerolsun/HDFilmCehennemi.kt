@@ -227,92 +227,101 @@ class HDFilmCehennemi : MainAPI() {
         Log.d("HDCH", "decodedTwice $decodedTwice")
              return hdchLink
         }
- private suspend fun invokeLocalSource(
-        source: String,
-        url: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        val script = app.get(
-            url,
-            referer = "${mainUrl}/"
-        ).document.select("script")
-            .find { it.data().contains("sources:") }?.data() ?: return
+
+    private suspend fun invokeLocalSource(source: String, url: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit ) {
+        val script    = app.get(url, referer = "${mainUrl}/", interceptor = interceptor).document.select("script").find { it.data().contains("sources:") }?.data() ?: return
+		Log.d("HDCH", "script » $script")
         val videoData = getAndUnpack(script).substringAfter("file_link=\"").substringBefore("\";")
-        val subData = script.substringAfter("tracks: [").substringBefore("]")
+		Log.d("HDCH", "videoData » $videoData")
+        val base64Input = videoData.substringAfter("dc_hello(\"").substringBefore("\");")
+        val lastUrl = dcHello(base64Input).substringAfter("https").let { "https$it" }
+        val subData   = script.substringAfter("tracks: [").substringBefore("]")
+		Log.d("HDCH", "subData » $subData")
+        AppUtils.tryParseJson<List<SubSource>>("[${subData}]")?.filter { it.kind == "captions"}?.map {
+            val subtitleUrl = "${mainUrl}${it.file}/"
 
-        callback.invoke(
-            ExtractorLink(
-                source,
-                source,
-                base64Decode(videoData),
-                "$mainUrl/",
-                Qualities.Unknown.value,
-                true
-            )
-        )
-
-        tryParseJson<List<SubSource>>("[${subData}]")
-            ?.filter { it.kind == "captions" }?.map {
-                subtitleCallback.invoke(
-                    SubtitleFile(
-                        it.label.toString(),
-                        fixUrl(it.file.toString())
-                    )
-                )
-            }
-    }
-
-    override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        app.get(data).document.select("nav.nav.card-nav.nav-slider a.nav-link").map {
-            Pair(it.attr("href"), it.text())
-        }.apmap { (url, source) ->
-            safeApiCall {
-                app.get(url).document.select("div.card-video > iframe").attr("data-src")
-                    .let { url ->
-                        if (url.startsWith(mainUrl)) {
-                            invokeLocalSource(source, url, subtitleCallback, callback)
-                        } else {
-                            loadExtractor(url, "$mainUrl/", subtitleCallback) { link ->
-                                callback.invoke(
-                                    ExtractorLink(
-                                        source,
-                                        source,
-                                        link.url,
-                                        link.referer,
-                                        link.quality,
-                                        link.type,
-                                        link.headers,
-                                        link.extractorData
-                                    )
-                                )
-                            }
-                        }
-                    }
-            }
+	    val headers = mapOf(
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0",
+        "Referer" to "subtitleUrl"
+    )
+    val subtitleResponse = app.get(subtitleUrl, headers = headers, allowRedirects=true, interceptor = interceptor)
+                if (subtitleResponse.isSuccessful) {
+                    subtitleCallback(SubtitleFile(it.language.toString(), subtitleUrl))
+                    Log.d("HDCH", "Subtitle added: $subtitleUrl")
+                } else {
+                    Log.d("HDCH", "Subtitle URL inaccessible: ${subtitleResponse.code}")
+                }
         }
-        return true
+        callback.invoke(
+            newExtractorLink(
+                source  = source,
+                name    = source,
+                url     = lastUrl,
+                type    = ExtractorLinkType.M3U8
+			) {
+                headers = mapOf("Referer" to "${mainUrl}/", "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Norton/124.0.0.0")
+                quality = Qualities.Unknown.value
+            }
+        )
     }
 
+override suspend fun loadLinks(
+    data: String,
+    isCasting: Boolean,
+    subtitleCallback: (SubtitleFile) -> Unit,
+    callback: (ExtractorLink) -> Unit
+): Boolean {
+    Log.d("HDCH", "data » $data")
+    val document = app.get(data, interceptor = interceptor).document
+
+    document.select("div.alternative-links").map { element ->
+        element to element.attr("data-lang").uppercase()
+    }.forEach { (element, langCode) ->
+        element.select("button.alternative-link").map { button ->
+            button.text().replace("(HDrip Xbet)", "").trim() + " $langCode" to button.attr("data-video")
+        }.forEach { (source, videoID) ->
+            val apiGet = app.get(
+                "${mainUrl}/video/$videoID/", interceptor = interceptor,
+                headers = mapOf(
+                    "Content-Type" to "application/json",
+                    "X-Requested-With" to "fetch"
+                ),
+                referer = data
+            ).text
+            Log.d("HDCH", "Found videoID: $videoID")
+            var iframe = Regex("""data-src=\\"([^"]+)""").find(apiGet)?.groupValues?.get(1)!!.replace("\\", "")
+            Log.d("HDCH", "$iframe » $iframe")
+            if (iframe.contains("rapidrame")) {
+                iframe = "${mainUrl}/rplayer/" + iframe.substringAfter("?rapidrame_id=")
+            } else if (iframe.contains("mobi")) {
+                val iframeDoc = Jsoup.parse(apiGet)
+                iframe = fixUrlNull(iframeDoc.selectFirst("iframe")?.attr("data-src")) ?: return@forEach
+            }
+            Log.d("HDCH", "$source » $videoID » $iframe")
+            invokeLocalSource(source, iframe, subtitleCallback, callback)
+        }
+    }
+    return true
+}
     private data class SubSource(
-        @JsonProperty("file") val file: String? = null,
-        @JsonProperty("label") val label: String? = null,
-        @JsonProperty("kind") val kind: String? = null,
+        @JsonProperty("file")    val file: String?  = null,
+        @JsonProperty("label")   val label: String? = null,
+        @JsonProperty("language") val language: String? = null,
+        @JsonProperty("kind")    val kind: String?  = null
     )
 
-    data class Result(
-        @JsonProperty("result") val result: ArrayList<Media>? = arrayListOf(),
+    data class Results(
+        @JsonProperty("results") val results: List<String> = arrayListOf()
+    )
+    data class HDFC(
+        @JsonProperty("html") val html: String,
+        @JsonProperty("meta") val meta: Meta
     )
 
-    data class Media(
-        @JsonProperty("title") val title: String? = null,
-        @JsonProperty("poster") val poster: String? = null,
-        @JsonProperty("slug") val slug: String? = null,
-        @JsonProperty("slug_prefix") val slugPrefix: String? = null,
+    data class Meta(
+        @JsonProperty("title") val title: String,
+        @JsonProperty("canonical") val canonical: Boolean,
+        @JsonProperty("keywords") val keywords: Boolean
     )
 }
