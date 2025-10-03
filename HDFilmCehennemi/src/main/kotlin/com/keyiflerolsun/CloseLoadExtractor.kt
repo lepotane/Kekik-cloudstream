@@ -7,7 +7,7 @@ import org.jsoup.nodes.Document
 
 class CloseLoad : ExtractorApi() {
     override val name = "CloseLoad"
-    override val mainUrl = "https://closeload.hdfilmcehennemi.la"
+    override val mainUrl = "https://hdfilmcehennemi.mobi"
     override val requiresReferer = true
 
     override suspend fun getUrl(
@@ -18,8 +18,8 @@ class CloseLoad : ExtractorApi() {
     ) {
         val headers2 = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0",
-            "Referer" to "https://closeload.hdfilmcehennemi.la/",
-            "Origin" to "https://closeload.hdfilmcehennemi.la"
+            "Referer" to "https://hdfilmcehennemi.mobi/",
+            "Origin" to "https://hdfilmcehennemi.mobi"
         )
         
         try {
