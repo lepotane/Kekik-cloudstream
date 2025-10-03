@@ -165,33 +165,32 @@ class HDFilmCehennemi : MainAPI() {
         }
     }
 
-    // 🔥 Yeni loadLinks - güncel iframe yapısı
+    // ✅ Güncel loadLinks
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.d("HDCH", "data » $data")
         val document = app.get(data, interceptor = interceptor).document
 
-        // Artık video player iframe data-src ile geliyor
+        // 1. Film sayfasındaki iframe
         val iframe = document.selectFirst("iframe")?.attr("data-src")
-        Log.d("HDCH", "iframe found: $iframe")
+        Log.d("HDCH", "iframe: $iframe")
 
         if (iframe != null) {
-            // Cloudstream'in kendi extractor’ları bu playeri çözebiliyorsa otomatik çözülür
-            loadExtractor(iframe, data, subtitleCallback, callback)
+            // 2. embed sayfasını aç
+            val embedDoc = app.get(iframe, referer = data, interceptor = interceptor).document
+            val realIframe = embedDoc.selectFirst("iframe")?.attr("src")
+            Log.d("HDCH", "realIframe: $realIframe")
+
+            if (realIframe != null) {
+                // 3. asıl player'i Cloudstream extractorlarına ver
+                loadExtractor(realIframe, iframe, subtitleCallback, callback)
+            }
         }
         return true
     }
-
-    private data class SubSource(
-        @JsonProperty("file")    val file: String?  = null,
-        @JsonProperty("label")   val label: String? = null,
-        @JsonProperty("language") val language: String? = null,
-        @JsonProperty("kind")    val kind: String?  = null
-    )
 
     data class Results(@JsonProperty("results") val results: List<String> = arrayListOf())
     data class HDFC(@JsonProperty("html") val html: String,
